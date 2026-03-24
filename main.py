@@ -1,17 +1,32 @@
+import argparse
 from simulator import SwarmSimulator
-from fsm_controller_template import SimpleFSMController
+from fsm_controller_template import CueFSMController, NeighborFSMController, HeteroFSMController
 import numpy as np
 import matplotlib.pyplot as plt
 
 def cue_field(x, y):
-    # Example: high cue in the top-right corner
-    return np.exp(-((x - 8) ** 2 + (y - 8) ** 2) / 4.0)
+    return np.exp(-((x - 5)**2 + (y - 5)**2) / 4.0)
+
 
 if __name__ == "__main__":
-    controller = SimpleFSMController(max_step=0.1)
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--controller", type=str, default="hetero",
+                        choices=["cue", "neighbor", "hetero"])
+    parser.add_argument("--n_agents", type=int, default=200)
+
+    args = parser.parse_args()
+
+    # Select controller
+    if args.controller == "cue":
+        controller = CueFSMController()
+    elif args.controller == "neighbor":
+        controller = NeighborFSMController()
+    else:
+        controller = HeteroFSMController()
 
     sim = SwarmSimulator(
-        n_agents=200,
+        n_agents=args.n_agents,
         arena_size=(10.0, 10.0),
         dt=0.1,
         max_step=0.1,
@@ -24,7 +39,7 @@ if __name__ == "__main__":
     plt.ion()
     fig, ax = plt.subplots(figsize=(5, 5))
 
-    for t in range(5000):
+    for t in range(3600):
         sim.step()
         pos = sim.get_positions()
         ax.clear()

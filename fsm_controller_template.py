@@ -1,91 +1,54 @@
 import numpy as np
 
-class SimpleFSMController:
-    """
-    Example FSM controller:
-    - States: 0 = explore, 1 = cluster
-    - Input: quantized neighbor count, quantized cue value
-    """
-
-    def __init__(
-        self,
-        neighbor_bins=(0, 3, 6, 999),
-        cue_bins=(0.0, 0.3, 0.7, 1e6),
-        max_step=0.1,
-    ):
+class CueFSMController:
+    """Cue-based: low cue (center) → small turns + full steps (stay); high cue → explore"""
+    def __init__(self, max_step=0.1, nd_levels=2):  # nd=2 best per paper
         self.max_step = max_step
-        self.neighbor_bins = neighbor_bins
-        self.cue_bins = cue_bins
+        self.nd_levels = nd_levels
+        # Map paper's α,ρ to step/turn: low α/high ρ = straight+long → full step/small turn
+        self.turn_sigmas = np.array([0.10, 0.60]) if nd_levels == 2 else np.array([0.10, 0.35, 0.70])
+        self.step_scales = np.array([1.0, 0.40]) if nd_levels == 2 else np.array([1.0, 0.70, 0.40])
 
-        # Per-agent internal states
-        self.states = {}  # agent_id -> int state
-
-    # ------------- public entry point ------------- #
     def step(self, agent_id, obs, rng):
-        # Ensure agent has a state
-        if agent_id not in self.states:
-            self.states[agent_id] = 0  # start in "explore"
+        cue = obs["cue_value"]  # expect 0=center(good), 1=edge(bad)
+        nd = min(int(cue * self.nd_levels), self.nd_levels - 1)
+        
+        step_size = self.step_scales[nd] * self.max_step
+        turn_delta = rng.normal(0.0, self.turn_sigmas[nd])
+        return {"step_size": step_size, "turn_delta": turn_delta}
 
-        state = self.states[agent_id]
+class NeighborFSMController:
+    """Neighbor-based: many neighbors → cluster (small turns); few → explore (big turns)"""
+    def __init__(self, max_step=0.1, nd_levels=3, max_neighbors=20):
+        self.max_step = max_step
+        self.nd_levels = nd_levels
+        self.max_n = max_neighbors
+        # Many neigh (nd=0) → cluster like paper's low α/high ρ
+        self.turn_sigmas = np.array([0.15, 0.15, 0.50])
+        self.step_scales = np.array([0.2, 0.2, 1.0])  # cluster slightly slower
 
-        # Read local observations
-        n = obs["neighbor_count"]
-        c = obs["cue_value"]
+    def step(self, agent_id, obs, rng):
+        n_neigh = obs["neighbor_count"]
+        norm_n = n_neigh / self.max_n
+        nd = min(int((1 - norm_n) * self.nd_levels), self.nd_levels - 1)  # invert: many→low nd
+        
+        step_size = self.step_scales[nd] * self.max_step
+        turn_delta = rng.normal(0.0, self.turn_sigmas[nd])
+        return {"step_size": step_size, "turn_delta": turn_delta}
+    
+class HeteroFSMController:
+    def __init__(self, max_step=0.1, cue_ratio=0.4, n_agents=1000, **kwargs):
+        self.max_step = max_step
+        self.cue_ratio = cue_ratio
+        self.cue_controller = CueFSMController(max_step=max_step, **kwargs)
+        self.neigh_controller = NeighborFSMController(max_step=max_step, **kwargs)
 
-        n_q = self._quantize_neighbors(n)
-        c_q = self._quantize_cue(c)
+        # One fixed type per agent for the whole run
+        self.is_cue_type = np.random.rand(n_agents) < cue_ratio
 
-        # FSM transition
-        new_state = self._transition(state, n_q, c_q, rng)
-        self.states[agent_id] = new_state
-
-        # Output motion parameters based on new_state
-        step_size, dtheta = self._output(new_state, rng)
-        return {"step_size": step_size, "turn_delta": dtheta}
-
-    # ------------- helper methods ------------- #
-    def _quantize_neighbors(self, n):
-        # returns bin index 0,1,2,...
-        for i in range(len(self.neighbor_bins) - 1):
-            if self.neighbor_bins[i] <= n < self.neighbor_bins[i + 1]:
-                return i
-        return len(self.neighbor_bins) - 2
-
-    def _quantize_cue(self, c):
-        for i in range(len(self.cue_bins) - 1):
-            if self.cue_bins[i] <= c < self.cue_bins[i + 1]:
-                return i
-        return len(self.cue_bins) - 2
-
-    def _transition(self, state, n_q, c_q, rng):
-        """
-        Example rules:
-        - if few neighbors and low cue -> explore
-        - if many neighbors or high cue -> cluster
-        """
-        if state == 0:  # explore
-            if n_q >= 2 or c_q >= 2:
-                # with some probability, switch to cluster
-                if rng.random() < 0.7:
-                    return 1
-            return 0
-        elif state == 1:  # cluster
-            if n_q == 0 and c_q == 0:
-                # leave cluster if isolated and in low cue
-                if rng.random() < 0.5:
-                    return 0
-            return 1
+    def step(self, agent_id, obs, rng):
+        if self.is_cue_type[agent_id]:
+            return self.cue_controller.step(agent_id, obs, rng)
         else:
-            return 0
+            return self.neigh_controller.step(agent_id, obs, rng)
 
-    def _output(self, state, rng):
-        if state == 0:  # explore: larger turns, larger steps
-            step = self.max_step
-            dtheta = rng.normal(0.0, 0.6)
-        elif state == 1:  # cluster: smaller steps, smaller turns
-            step = 0.3 * self.max_step
-            dtheta = rng.normal(0.0, 0.1)
-        else:
-            step = self.max_step
-            dtheta = rng.normal(0.0, 0.6)
-        return step, dtheta
